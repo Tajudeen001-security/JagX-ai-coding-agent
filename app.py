@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-JagX Coder — Web UI
-Simple Streamlit frontend so anyone can use the coding agent in the browser.
+JagX Coder — Web UI (Enhanced)
+Free to host on Streamlit Community Cloud / Hugging Face Spaces / Render
 """
 
 from __future__ import annotations
@@ -10,7 +10,10 @@ import os
 import re
 import sys
 import json
+import base64
+import zipfile
 import traceback
+import io
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
@@ -24,6 +27,9 @@ try:
 except ImportError:
     pass
 
+# ──────────────────────────────────────────────────────────────
+# CONFIG
+# ──────────────────────────────────────────────────────────────
 DEFAULT_BASE = "https://jagx-ai-v2.onrender.com"
 MAX_TOKENS = 1800
 MAX_TOOL_ROUNDS = 20
@@ -32,17 +38,22 @@ REQUEST_TIMEOUT = 120
 WEB_WORKSPACE = Path(os.getenv("JAGX_WORKSPACE", "./web_workspace")).resolve()
 WEB_WORKSPACE.mkdir(parents=True, exist_ok=True)
 
+# ──────────────────────────────────────────────────────────────
+# TOOLS
+# ──────────────────────────────────────────────────────────────
+@dataclass
+class ToolResult:
+    success: bool
+    output: str
+    error: Optional[str] = None
+
+
 def safe_path(path: str) -> Path:
     target = (WEB_WORKSPACE / path).resolve()
     if not str(target).startswith(str(WEB_WORKSPACE)):
         raise PermissionError(f"Path outside workspace is not allowed: {path}")
     return target
 
-@dataclass
-class ToolResult:
-    success: bool
-    output: str
-    error: Optional[str] = None
 
 def tool_list_dir(path: str = ".") -> ToolResult:
     try:
@@ -60,6 +71,7 @@ def tool_list_dir(path: str = ".") -> ToolResult:
     except Exception as e:
         return ToolResult(False, "", str(e))
 
+
 def tool_read_file(path: str, start_line: int = 1, end_line: Optional[int] = None) -> ToolResult:
     try:
         target = safe_path(path)
@@ -76,6 +88,7 @@ def tool_read_file(path: str, start_line: int = 1, end_line: Optional[int] = Non
     except Exception as e:
         return ToolResult(False, "", str(e))
 
+
 def tool_write_file(path: str, content: str, overwrite: bool = True) -> ToolResult:
     try:
         target = safe_path(path)
@@ -87,6 +100,7 @@ def tool_write_file(path: str, content: str, overwrite: bool = True) -> ToolResu
     except Exception as e:
         return ToolResult(False, "", str(e))
 
+
 def tool_append_file(path: str, content: str) -> ToolResult:
     try:
         target = safe_path(path)
@@ -96,6 +110,7 @@ def tool_append_file(path: str, content: str) -> ToolResult:
         return ToolResult(True, f"Appended {len(content)} chars → {path}")
     except Exception as e:
         return ToolResult(False, "", str(e))
+
 
 def tool_run_shell(command: str, timeout: int = 45) -> ToolResult:
     import subprocess
@@ -116,6 +131,7 @@ def tool_run_shell(command: str, timeout: int = 45) -> ToolResult:
     except Exception as e:
         return ToolResult(False, "", str(e))
 
+
 def tool_run_python(code: str) -> ToolResult:
     import subprocess, tempfile
     try:
@@ -133,6 +149,7 @@ def tool_run_python(code: str) -> ToolResult:
         return ToolResult(True, out.strip() or "(no output)")
     except Exception as e:
         return ToolResult(False, "", str(e))
+
 
 def tool_search_code(query: str, path: str = ".", glob: str = "*.py") -> ToolResult:
     try:
@@ -158,6 +175,7 @@ def tool_search_code(query: str, path: str = ".", glob: str = "*.py") -> ToolRes
     except Exception as e:
         return ToolResult(False, "", str(e))
 
+
 TOOLS = {
     "list_dir": {"fn": tool_list_dir, "desc": "List files/dirs. Args: path (default '.')"},
     "read_file": {"fn": tool_read_file, "desc": "Read file. Args: path, start_line=1, end_line=None"},
@@ -168,6 +186,9 @@ TOOLS = {
     "search_code": {"fn": tool_search_code, "desc": "Search code. Args: query, path='.', glob='*.py'"},
 }
 
+# ──────────────────────────────────────────────────────────────
+# PROMPT + PARSER
+# ──────────────────────────────────────────────────────────────
 SYSTEM_CORE = """You are JagX Coder — an elite autonomous coding agent powered by JagX AI (created by JagX & JRILICENSE).
 
 You are extremely skilled at writing production-quality code, debugging, refactoring, and building complete applications.
@@ -197,18 +218,15 @@ Rules:
 6. You are JagX AI by JagX & JRILICENSE.
 """
 
+
 def parse_agent_response(text: str) -> Tuple[str, Optional[str], Optional[Dict], Optional[str]]:
-    thought = ""
-    action = None
-    action_input = None
-    final = None
+    thought, action, action_input, final = "", None, None, None
     m = re.search(r"Thought:\s*(.*?)(?=\n(?:Action|Final Answer):|\Z)", text, re.DOTALL | re.IGNORECASE)
     if m:
         thought = m.group(1).strip()
     m = re.search(r"Final Answer:\s*(.*)", text, re.DOTALL | re.IGNORECASE)
     if m:
-        final = m.group(1).strip()
-        return thought, None, None, final
+        return thought, None, None, m.group(1).strip()
     m = re.search(r"Action:\s*(\w+)", text, re.IGNORECASE)
     if m:
         action = m.group(1).strip()
@@ -226,6 +244,7 @@ def parse_agent_response(text: str) -> Tuple[str, Optional[str], Optional[Dict],
                 action_input = {"_raw": raw, "_parse_error": True}
     return thought, action, action_input, final
 
+
 def call_jagx(api_key: str, base_url: str, message: str) -> str:
     headers = {"Content-Type": "application/json", "x-api-key": api_key}
     payload = {"message": message, "max_tokens": MAX_TOKENS}
@@ -233,62 +252,178 @@ def call_jagx(api_key: str, base_url: str, message: str) -> str:
     r.raise_for_status()
     return r.json().get("response", "").strip()
 
-st.set_page_config(page_title="JagX Coder", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
+
+def call_jagx_image(api_key: str, base_url: str, prompt: str) -> Optional[str]:
+    """Returns base64 image string or None"""
+    try:
+        headers = {"Content-Type": "application/json", "x-api-key": api_key}
+        payload = {"prompt": prompt, "width": 1024, "height": 1024}
+        r = requests.post(f"{base_url.rstrip('/')}/image", headers=headers, json=payload, timeout=90)
+        if r.status_code == 200:
+            data = r.json()
+            if data.get("success") and data.get("image_base64"):
+                return data["image_base64"]
+    except Exception:
+        pass
+    return None
+
+
+def make_zip_of_workspace() -> Optional[bytes]:
+    files = [f for f in WEB_WORKSPACE.rglob("*") if f.is_file()]
+    if not files:
+        return None
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for f in files:
+            zf.write(f, f.relative_to(WEB_WORKSPACE))
+    return buf.getvalue()
+
+
+# ──────────────────────────────────────────────────────────────
+# STREAMLIT UI
+# ──────────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="JagX Coder",
+    page_icon="⚡",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
 st.markdown("""
 <style>
     .main-header {
-        font-size: 2.4rem; font-weight: 800;
-        background: linear-gradient(90deg, #00d2ff, #3a7bd5);
+        font-size: 2.5rem; font-weight: 800;
+        background: linear-gradient(90deg, #00d2ff, #3a7bd5, #9b59b6);
         -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-        margin-bottom: 0;
+        margin-bottom: 0.1rem;
     }
-    .sub-header { color: #888; font-size: 1.05rem; margin-top: 0; }
+    .sub-header { color: #888; font-size: 1.05rem; margin-bottom: 1.2rem; }
+    div[data-testid="stSidebar"] { background: linear-gradient(180deg, #0e1117 0%, #1a1d29 100%); }
+    .stButton > button { border-radius: 8px; }
+    .example-btn { margin: 0.2rem 0; }
 </style>
 """, unsafe_allow_html=True)
 
+# ── Sidebar ──────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## ⚡ JagX Coder")
-    st.caption("Autonomous coding agent powered by JagX AI")
+    st.caption("Autonomous coding agent · Powered by JagX AI")
     st.divider()
-    api_key = st.text_input("JagX API Key", value=os.getenv("JAGX_API_KEY", ""), type="password",
-                            help="Starts with jagx-...", placeholder="jagx-xxxxxxxxxxxxxxxx")
-    base_url = st.text_input("API Base URL", value=os.getenv("JAGX_BASE_URL", DEFAULT_BASE),
-                             help="Usually https://jagx-ai-v2.onrender.com")
+
+    api_key = st.text_input(
+        "🔑 JagX API Key",
+        value=os.getenv("JAGX_API_KEY", ""),
+        type="password",
+        placeholder="jagx-xxxxxxxxxxxxxxxx",
+        help="Get your key from the JagX AI service",
+    )
+    base_url = st.text_input(
+        "🌐 API Base URL",
+        value=os.getenv("JAGX_BASE_URL", DEFAULT_BASE),
+    )
+
     st.divider()
-    st.markdown("### 📁 Workspace files")
-    files = list(WEB_WORKSPACE.rglob("*"))
-    code_files = [f for f in files if f.is_file()]
+    st.markdown("### 📁 Workspace")
+
+    code_files = sorted([f for f in WEB_WORKSPACE.rglob("*") if f.is_file()])
     if code_files:
-        for f in sorted(code_files)[:30]:
-            st.code(str(f.relative_to(WEB_WORKSPACE)), language=None)
+        for f in code_files[:25]:
+            rel = str(f.relative_to(WEB_WORKSPACE))
+            col1, col2 = st.columns([4, 1])
+            with col1:
+                st.code(rel, language=None)
+            with col2:
+                try:
+                    data = f.read_bytes()
+                    st.download_button("⬇️", data=data, file_name=f.name, key=f"dl_{rel}", help=f"Download {rel}")
+                except Exception:
+                    pass
+        zip_data = make_zip_of_workspace()
+        if zip_data:
+            st.download_button(
+                "📦 Download all as ZIP",
+                data=zip_data,
+                file_name="jagx_workspace.zip",
+                mime="application/zip",
+                use_container_width=True,
+            )
     else:
         st.caption("No files yet — ask the agent to create some!")
-    if st.button("🗑️ Clear workspace", use_container_width=True):
-        import shutil
-        for item in WEB_WORKSPACE.iterdir():
-            if item.is_file(): item.unlink()
-            else: shutil.rmtree(item)
-        st.success("Workspace cleared")
-        st.rerun()
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if st.button("🗑️ Clear files", use_container_width=True):
+            import shutil
+            for item in WEB_WORKSPACE.iterdir():
+                if item.is_file():
+                    item.unlink()
+                else:
+                    shutil.rmtree(item, ignore_errors=True)
+            st.rerun()
+    with col_b:
+        if st.button("💬 Clear chat", use_container_width=True):
+            st.session_state.messages = []
+            st.session_state.history = []
+            st.rerun()
+
     st.divider()
-    st.caption("Created by JagX & JRILICENSE")
+    st.markdown("### 🎨 Generate Image")
+    img_prompt = st.text_input("Image prompt", placeholder="A futuristic robot coding...")
+    if st.button("Generate image", use_container_width=True) and img_prompt:
+        if not api_key or not api_key.startswith("jagx-"):
+            st.error("Need a valid API key")
+        else:
+            with st.spinner("Generating..."):
+                b64 = call_jagx_image(api_key, base_url, img_prompt)
+                if b64:
+                    st.image(f"data:image/png;base64,{b64}", use_container_width=True)
+                    st.download_button("⬇️ Download image", data=base64.b64decode(b64),
+                                       file_name="jagx_image.png", mime="image/png")
+                else:
+                    st.warning("Image generation failed or not available")
 
+    st.divider()
+    st.caption("JagX AI by JagX & JRILICENSE")
+    st.caption("Free · Open · Powerful")
+
+# ── Main ─────────────────────────────────────────────────────
 st.markdown('<p class="main-header">JagX Coder</p>', unsafe_allow_html=True)
-st.markdown('<p class="sub-header">Tell me what to build — I will write, run and fix the code for you.</p>', unsafe_allow_html=True)
+st.markdown('<p class="sub-header">Tell me what to build — I write, run & fix the code for you.</p>', unsafe_allow_html=True)
 
+# Example chips
+EXAMPLES = [
+    "Create hello.py that prints Hello from JagX Coder! and run it",
+    "Build a Python CLI todo app with add/list/done and JSON storage",
+    "Write a FastAPI app with /health and /items CRUD",
+    "Create a factorial function and test it with 5, 7, 10",
+    "Scaffold a notes API: FastAPI + SQLite + full CRUD",
+]
+
+st.markdown("**Quick start:**")
+cols = st.columns(len(EXAMPLES))
+for i, ex in enumerate(EXAMPLES):
+    with cols[i]:
+        if st.button(ex[:28] + "…", key=f"ex_{i}", use_container_width=True, help=ex):
+            st.session_state["pending_prompt"] = ex
+
+# Session state
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "history" not in st.session_state:
     st.session_state.history = []
 
+# Show history
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-if prompt := st.chat_input("e.g. Create a Python todo CLI app with JSON storage..."):
+# Handle pending example click
+pending = st.session_state.pop("pending_prompt", None)
+prompt = st.chat_input("Describe what you want me to code...") or pending
+
+if prompt:
     if not api_key or not api_key.startswith("jagx-"):
-        st.error("Please enter a valid JagX API key in the sidebar (starts with `jagx-`).")
+        st.error("👉 Please enter a valid JagX API key in the sidebar (starts with `jagx-`).")
         st.stop()
 
     st.session_state.messages.append({"role": "user", "content": prompt})
@@ -302,7 +437,7 @@ if prompt := st.chat_input("e.g. Create a Python todo CLI app with JSON storage.
 
         def add_log(text: str):
             logs.append(text)
-            log_area.markdown("\n\n".join(logs[-12:]))
+            log_area.markdown("\n\n".join(logs[-14:]))
 
         try:
             history = st.session_state.history[-10:]
@@ -317,13 +452,16 @@ if prompt := st.chat_input("e.g. Create a Python todo CLI app with JSON storage.
 
             for round_idx in range(1, MAX_TOOL_ROUNDS + 1):
                 status.update(label=f"🤖 Round {round_idx}/{MAX_TOOL_ROUNDS} — thinking...")
+
                 try:
                     if round_idx == 1:
                         raw = call_jagx(api_key, base_url, full_prompt)
                     else:
-                        cont = (SYSTEM_PROMPT + "\n\n=== Conversation ===\n" +
-                                "\n".join(f"{t['role'].upper()}: {t['content']}" for t in st.session_state.history[-12:]) +
-                                f"\nUSER: {current_input}\nASSISTANT:")
+                        cont = (
+                            SYSTEM_PROMPT + "\n\n=== Conversation ===\n"
+                            + "\n".join(f"{t['role'].upper()}: {t['content']}" for t in st.session_state.history[-12:])
+                            + f"\nUSER: {current_input}\nASSISTANT:"
+                        )
                         raw = call_jagx(api_key, base_url, cont)
                 except Exception as e:
                     add_log(f"❌ API error: {e}")
@@ -331,13 +469,16 @@ if prompt := st.chat_input("e.g. Create a Python todo CLI app with JSON storage.
                     break
 
                 thought, action, action_input, final = parse_agent_response(raw)
+
                 if thought:
-                    add_log(f"**💭 Thought:** {thought[:250]}{'...' if len(thought) > 250 else ''}")
+                    add_log(f"**💭 Thought:** {thought[:280]}{'…' if len(thought) > 280 else ''}")
+
                 if final is not None:
                     final_answer = final
                     add_log("✅ Task complete")
                     status.update(label="✅ Done!", state="complete")
                     break
+
                 if not action or action not in TOOLS:
                     final_answer = raw
                     add_log("⚠ Free-form reply (treating as final)")
@@ -346,6 +487,7 @@ if prompt := st.chat_input("e.g. Create a Python todo CLI app with JSON storage.
 
                 add_log(f"**🔧 Action:** `{action}`")
                 add_log(f"**Input:** `{json.dumps(action_input, ensure_ascii=False)[:180]}`")
+
                 tool_fn = TOOLS[action]["fn"]
                 try:
                     if action_input and not action_input.get("_parse_error"):
@@ -358,11 +500,13 @@ if prompt := st.chat_input("e.g. Create a Python todo CLI app with JSON storage.
                     result = ToolResult(False, "", str(e))
 
                 observation = result.output if result.success else f"ERROR: {result.error}\n{result.output}"
-                status_icon = "✅" if result.success else "❌"
-                add_log(f"{status_icon} **Result:** {observation[:350]}{'...' if len(observation) > 350 else ''}")
+                icon = "✅" if result.success else "❌"
+                add_log(f"{icon} **Result:** {observation[:350]}{'…' if len(observation) > 350 else ''}")
 
-                obs_msg = (f"Thought: {thought}\nAction: {action}\n"
-                           f"Action Input: {json.dumps(action_input)}\nObservation: {observation}")
+                obs_msg = (
+                    f"Thought: {thought}\nAction: {action}\n"
+                    f"Action Input: {json.dumps(action_input)}\nObservation: {observation}"
+                )
                 st.session_state.history.append({"role": "assistant", "content": obs_msg})
                 current_input = f"Observation from {action}:\n{observation}\n\nContinue the task."
 
@@ -374,15 +518,10 @@ if prompt := st.chat_input("e.g. Create a Python todo CLI app with JSON storage.
             st.session_state.messages.append({"role": "assistant", "content": final_answer})
             st.session_state.history.append({"role": "user", "content": prompt})
             st.session_state.history.append({"role": "assistant", "content": final_answer})
+
+            if code_files or list(WEB_WORKSPACE.rglob("*")):
+                st.info("📁 New files may appear in the sidebar — you can download them.")
+
         except Exception as e:
             st.error(f"Unexpected error: {e}")
             traceback.print_exc()
-
-with st.expander("💡 Example prompts you can try"):
-    st.markdown("""
-- `Create a file hello.py that prints "Hello from JagX Coder!" and run it`
-- `Build a simple Python CLI todo app with add / list / done and JSON storage`
-- `Write a FastAPI app with /health and /items endpoints`
-- `Create a function that calculates factorial and test it with 5`
-- `Scaffold a notes API with FastAPI + SQLite + CRUD endpoints`
-    """)
