@@ -112,7 +112,6 @@ def tool_write_file(path: str, content: str, overwrite: bool = True) -> ToolResu
             content = ""
         if not isinstance(content, str):
             content = str(content)
-        # Reject empty content for non-init files (common agent failure)
         if len(content.strip()) < 3 and not path.endswith("__init__.py"):
             return ToolResult(False, "", f"Refused to write empty content to {path}. Provide real code.")
         target = safe_path(path)
@@ -272,7 +271,8 @@ Action Input: <valid JSON>
 
 When fully done:
 
-Thought: <summary>
+Thought: **Summary:**
+
 Final Answer: <how to run the project + security notes>
 
 Available tools:
@@ -324,8 +324,6 @@ def parse_agent_response(text: str) -> Tuple[str, Optional[str], Optional[Dict],
 
 
 def extract_json_block(text: str) -> Optional[dict]:
-    """Pull first JSON object from model reply."""
-    # try full parse
     text = text.strip()
     if text.startswith("{"):
         try:
@@ -372,9 +370,7 @@ def guess_lang(path: str) -> str:
         ".md": "markdown", ".sh": "bash", ".yml": "yaml", ".yaml": "yaml",
         ".txt": "text", ".sql": "sql",
     }.get(ext, "text")
-
-
-# ──────────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────────
 # UI
 # ──────────────────────────────────────────────────────────────
 st.set_page_config(page_title="JagX Coder", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
@@ -396,11 +392,10 @@ st.markdown("""
 API_KEY = get_secret("JAGX_API_KEY", "")
 BASE_URL = get_secret("JAGX_BASE_URL", DEFAULT_BASE)
 
-# Session state
 for k, v in {
     "messages": [],
     "history": [],
-    "phase": "idle",          # idle | planning | answering | building | done
+    "phase": "idle",
     "plan_questions": None,
     "plan_intro": "",
     "user_answers": {},
@@ -412,7 +407,6 @@ for k, v in {
     if k not in st.session_state:
         st.session_state[k] = v
 
-# ── Sidebar ──────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## ⚡ JagX Coder")
     st.caption("Plan → Confirm → Live build + preview")
@@ -477,16 +471,13 @@ with st.sidebar:
     st.divider()
     st.caption("JagX AI by JagX & JRILICENSE")
 
-# ── Main ─────────────────────────────────────────────────────
 st.markdown('<p class="main-header">JagX Coder</p>', unsafe_allow_html=True)
 st.markdown('<p class="sub-header">Exam-style planning → confirm → live coding with file preview</p>', unsafe_allow_html=True)
 
-# Show chat history
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# ── PHASE: PLANNING (show MCQs) ──────────────────────────────
 if st.session_state.phase == "answering" and st.session_state.plan_questions:
     st.markdown("---")
     st.markdown("### 📋 Project setup (pick one option for each)")
@@ -498,7 +489,6 @@ if st.session_state.phase == "answering" and st.session_state.plan_questions:
     for q in qs:
         qid = q.get("id", 0)
         opts = q.get("options", {})
-        labels = [f"{k}) {v}" for k, v in opts.items()]
         choice = st.radio(
             f"**Q{qid}. {q.get('question', '')}**",
             options=list(opts.keys()),
@@ -510,7 +500,6 @@ if st.session_state.phase == "answering" and st.session_state.plan_questions:
     if st.button("✅ Submit answers & start building", type="primary", use_container_width=True):
         st.session_state.user_answers = answers
         st.session_state.phase = "building"
-        # Build a clear brief for the agent
         brief_lines = [f"Original request: {st.session_state.original_request}", "User choices:"]
         for q in qs:
             qid = q.get("id")
@@ -519,7 +508,6 @@ if st.session_state.phase == "answering" and st.session_state.plan_questions:
         st.session_state.build_brief = "\n".join(brief_lines)
         st.rerun()
 
-# ── PHASE: BUILDING (live) ───────────────────────────────────
 if st.session_state.phase == "building":
     st.markdown("---")
     st.markdown("### 🔨 Live build")
@@ -593,7 +581,6 @@ if st.session_state.phase == "building":
 
             add_log(f"**🔧 Action:** `{action}`")
 
-            # Live preview when writing
             if action == "write_file" and isinstance(action_input, dict) and not action_input.get("_parse_error"):
                 path = action_input.get("path", "")
                 content = action_input.get("content", "")
@@ -639,7 +626,6 @@ if st.session_state.phase == "building":
 
         if list_workspace_files():
             st.info("📁 Files are in the sidebar. Download the ZIP before the app sleeps.")
-            # show last preview again
             if st.session_state.last_written_file and st.session_state.last_written_content:
                 with st.expander(f"Last written file: {st.session_state.last_written_file}", expanded=True):
                     st.code(st.session_state.last_written_content[:12000],
@@ -649,7 +635,6 @@ if st.session_state.phase == "building":
         st.error(f"Error: {e}")
         traceback.print_exc()
 
-# ── Idle / new request ───────────────────────────────────────
 if st.session_state.phase in ("idle", "done"):
     EXAMPLES = [
         "Build a secure full-stack notes app with FastAPI, SQLite, JWT and a simple HTML UI",
@@ -693,7 +678,6 @@ if st.session_state.phase in ("idle", "done"):
                         st.success("Answer the 3 questions below, then submit.")
                         st.rerun()
                     else:
-                        # fallback: skip planning, go build
                         st.warning("Could not parse plan questions — starting build with your request as-is.")
                         st.session_state.build_brief = prompt
                         st.session_state.phase = "building"
@@ -701,5 +685,3 @@ if st.session_state.phase in ("idle", "done"):
                 except Exception as e:
                     st.error(f"Planning failed: {e}")
                     st.session_state.phase = "idle"
-ENDOFFILE
-wc -l app.py && echo "OK"
