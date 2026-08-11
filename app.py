@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-JagX Coder — Web UI (Enhanced)
-Free to host on Streamlit Community Cloud / Hugging Face Spaces / Render
+JagX Coder — Advanced Web UI
+- Shared API key via Streamlit Secrets (all users can use it)
+- Deep reasoning for complex & full-stack apps
+- Cybersecurity-focused capabilities
 """
 
 from __future__ import annotations
@@ -28,15 +30,32 @@ except ImportError:
     pass
 
 # ──────────────────────────────────────────────────────────────
-# CONFIG
+# CONFIG (Secrets → env → default)
 # ──────────────────────────────────────────────────────────────
-DEFAULT_BASE = "https://jagx-ai-v2.onrender.com"
-MAX_TOKENS = 1800
-MAX_TOOL_ROUNDS = 20
-REQUEST_TIMEOUT = 120
+def get_secret(key: str, default: str = "") -> str:
+    """Read from Streamlit secrets first, then environment, then default."""
+    try:
+        if key in st.secrets:
+            return str(st.secrets[key]).strip()
+    except Exception:
+        pass
+    return os.getenv(key, default).strip()
 
-WEB_WORKSPACE = Path(os.getenv("JAGX_WORKSPACE", "./web_workspace")).resolve()
+DEFAULT_BASE = "https://jagx-ai-v2.onrender.com"
+MAX_TOKENS = 2200
+MAX_TOOL_ROUNDS = 35
+REQUEST_TIMEOUT = 150
+
+WEB_WORKSPACE = Path(get_secret("JAGX_WORKSPACE", "./web_workspace")).resolve()
 WEB_WORKSPACE.mkdir(parents=True, exist_ok=True)
+
+HIDDEN_NAMES = {
+    ".env", ".env.local", ".env.example",
+    ".git", ".gitignore", ".devcontainer",
+    "__pycache__", ".streamlit", "web_workspace",
+    "app.py", "jagx_coder.py", "requirements.txt",
+    "README.md", "LICENSE", "HOSTING.md", ".dockerignore",
+}
 
 # ──────────────────────────────────────────────────────────────
 # TOOLS
@@ -64,10 +83,12 @@ def tool_list_dir(path: str = ".") -> ToolResult:
             return ToolResult(True, f"[FILE] {path}")
         entries = []
         for p in sorted(target.iterdir()):
+            if p.name in HIDDEN_NAMES or p.name.startswith(".git"):
+                continue
             kind = "DIR " if p.is_dir() else "FILE"
             size = f"{p.stat().st_size:>8}" if p.is_file() else "       -"
             entries.append(f"{kind}  {size}  {p.name}")
-        return ToolResult(True, "\n".join(entries) if entries else "(empty)")
+        return ToolResult(True, "\n".join(entries) if entries else "(empty workspace)")
     except Exception as e:
         return ToolResult(False, "", str(e))
 
@@ -112,10 +133,13 @@ def tool_append_file(path: str, content: str) -> ToolResult:
         return ToolResult(False, "", str(e))
 
 
-def tool_run_shell(command: str, timeout: int = 45) -> ToolResult:
+def tool_run_shell(command: str, timeout: int = 60) -> ToolResult:
     import subprocess
     try:
-        dangerous = ["rm -rf /", "mkfs", ":(){:|:&};:", "dd if=/dev/zero", "chmod -R 777 /"]
+        dangerous = [
+            "rm -rf /", "mkfs", ":(){:|:&};:", "dd if=/dev/zero",
+            "chmod -R 777 /", "curl | bash", "wget | sh",
+        ]
         if any(d in command for d in dangerous):
             return ToolResult(False, "", "Blocked potentially destructive command")
         result = subprocess.run(
@@ -140,7 +164,7 @@ def tool_run_python(code: str) -> ToolResult:
             tmp = f.name
         result = subprocess.run(
             [sys.executable, tmp], cwd=str(WEB_WORKSPACE),
-            capture_output=True, text=True, timeout=40,
+            capture_output=True, text=True, timeout=50,
         )
         Path(tmp).unlink(missing_ok=True)
         out = (result.stdout or "") + (result.stderr or "")
@@ -151,26 +175,28 @@ def tool_run_python(code: str) -> ToolResult:
         return ToolResult(False, "", str(e))
 
 
-def tool_search_code(query: str, path: str = ".", glob: str = "*.py") -> ToolResult:
+def tool_search_code(query: str, path: str = ".", glob: str = "*.*") -> ToolResult:
     try:
         target = safe_path(path)
         matches = []
         for p in target.rglob(glob):
             if not p.is_file():
                 continue
+            if any(part in HIDDEN_NAMES for part in p.parts):
+                continue
             try:
                 for i, line in enumerate(p.read_text(encoding="utf-8", errors="ignore").splitlines(), 1):
                     if query.lower() in line.lower():
                         rel = p.relative_to(WEB_WORKSPACE)
                         matches.append(f"{rel}:{i}: {line.strip()[:120]}")
-                        if len(matches) >= 40:
+                        if len(matches) >= 50:
                             break
             except Exception:
                 continue
-            if len(matches) >= 40:
+            if len(matches) >= 50:
                 break
         if not matches:
-            return ToolResult(True, f"No matches for '{query}' in {glob}")
+            return ToolResult(True, f"No matches for '{query}'")
         return ToolResult(True, "\n".join(matches))
     except Exception as e:
         return ToolResult(False, "", str(e))
@@ -178,44 +204,68 @@ def tool_search_code(query: str, path: str = ".", glob: str = "*.py") -> ToolRes
 
 TOOLS = {
     "list_dir": {"fn": tool_list_dir, "desc": "List files/dirs. Args: path (default '.')"},
-    "read_file": {"fn": tool_read_file, "desc": "Read file. Args: path, start_line=1, end_line=None"},
-    "write_file": {"fn": tool_write_file, "desc": "Write file. Args: path, content, overwrite=True"},
-    "append_file": {"fn": tool_append_file, "desc": "Append to file. Args: path, content"},
-    "run_shell": {"fn": tool_run_shell, "desc": "Run shell command. Args: command, timeout=45"},
-    "run_python": {"fn": tool_run_python, "desc": "Execute Python code. Args: code"},
-    "search_code": {"fn": tool_search_code, "desc": "Search code. Args: query, path='.', glob='*.py'"},
+    "read_file": {"fn": tool_read_file, "desc": "Read file with line numbers. Args: path, start_line=1, end_line=None"},
+    "write_file": {"fn": tool_write_file, "desc": "Create/overwrite a file. Args: path, content, overwrite=True"},
+    "append_file": {"fn": tool_append_file, "desc": "Append text to a file. Args: path, content"},
+    "run_shell": {"fn": tool_run_shell, "desc": "Run shell command in workspace. Args: command, timeout=60"},
+    "run_python": {"fn": tool_run_python, "desc": "Execute Python code snippet. Args: code"},
+    "search_code": {"fn": tool_search_code, "desc": "Search text in files. Args: query, path='.', glob='*.*'"},
 }
 
 # ──────────────────────────────────────────────────────────────
-# PROMPT + PARSER
+# DEEP REASONING SYSTEM PROMPT
 # ──────────────────────────────────────────────────────────────
-SYSTEM_CORE = """You are JagX Coder — an elite autonomous coding agent powered by JagX AI (created by JagX & JRILICENSE).
+SYSTEM_CORE = """You are JagX Coder — an elite autonomous software engineer and cybersecurity specialist powered by JagX AI (created by JagX & JRILICENSE).
 
-You are extremely skilled at writing production-quality code, debugging, refactoring, and building complete applications.
+You do NOT rush. You think carefully before every action.
 
-You operate in a ReAct loop. For every step reply in EXACTLY this format:
+Your expertise covers:
+1. Full-stack application development (frontend + backend + database + auth + deployment)
+2. Complex multi-file projects with clean architecture
+3. Cybersecurity: secure coding, vulnerability analysis, penetration-testing helpers, hardening, OWASP, auth/JWT, input validation, secrets management
+4. Debugging, refactoring, testing, and documentation
 
-Thought: <your reasoning>
+=== HOW YOU MUST WORK ===
+
+You operate in a careful ReAct loop. For EVERY step you MUST reply in EXACTLY this format:
+
+Thought: <deep reasoning — what is the goal, what already exists, what is the best next small step, what could go wrong, security considerations>
 Action: <tool_name>
 Action Input: <valid JSON object>
 
-When the task is complete:
+When the entire task is truly finished:
 
-Thought: <final reasoning>
-Final Answer: <your complete response to the user>
+Thought: **Summary:**
+
+Final Answer: <clear complete response to the user, including how to run the project and any security notes>
 
 Available tools:
 """
 TOOL_DOCS = "\n".join(f"- {name}: {meta['desc']}" for name, meta in TOOLS.items())
 SYSTEM_PROMPT = SYSTEM_CORE + TOOL_DOCS + """
 
-Rules:
-1. Always use Thought / Action / Action Input format for tools.
-2. Action Input MUST be valid JSON.
-3. Prefer small steps. Read before write. Test after change.
-4. Never invent file contents — read first if unsure.
-5. Prefer relative paths.
-6. You are JagX AI by JagX & JRILICENSE.
+=== STRICT RULES ===
+
+1. ALWAYS write a thoughtful Thought before every Action. Never skip reasoning.
+2. Prefer many small, correct steps over one giant risky step.
+3. For complex or full-stack apps:
+   - First create a clear project structure (folders + key files)
+   - Then implement backend / API
+   - Then database models
+   - Then frontend or templates
+   - Then auth / security layer
+   - Then tests or a quick verification
+   - Finally write a short README with run instructions
+4. For cybersecurity tasks:
+   - Prefer defensive and educational approaches
+   - Point out risks and mitigations
+   - Never help with real-world attacks against systems you do not own
+   - Focus on secure coding patterns, auditing code, hardening configs, CTF-style learning, and defensive tools
+5. Action Input MUST be valid JSON.
+6. Read a file before modifying it if you are unsure of its contents.
+7. After writing important code, run a quick test when possible.
+8. Keep the workspace clean. Use relative paths only.
+9. You are JagX AI by JagX & JRILICENSE.
 """
 
 
@@ -254,7 +304,6 @@ def call_jagx(api_key: str, base_url: str, message: str) -> str:
 
 
 def call_jagx_image(api_key: str, base_url: str, prompt: str) -> Optional[str]:
-    """Returns base64 image string or None"""
     try:
         headers = {"Content-Type": "application/json", "x-api-key": api_key}
         payload = {"prompt": prompt, "width": 1024, "height": 1024}
@@ -269,7 +318,13 @@ def call_jagx_image(api_key: str, base_url: str, prompt: str) -> Optional[str]:
 
 
 def make_zip_of_workspace() -> Optional[bytes]:
-    files = [f for f in WEB_WORKSPACE.rglob("*") if f.is_file()]
+    files = []
+    for f in WEB_WORKSPACE.rglob("*"):
+        if not f.is_file():
+            continue
+        if any(part in HIDDEN_NAMES or part.startswith(".git") for part in f.relative_to(WEB_WORKSPACE).parts):
+            continue
+        files.append(f)
     if not files:
         return None
     buf = io.BytesIO()
@@ -277,6 +332,18 @@ def make_zip_of_workspace() -> Optional[bytes]:
         for f in files:
             zf.write(f, f.relative_to(WEB_WORKSPACE))
     return buf.getvalue()
+
+
+def list_workspace_files():
+    result = []
+    for f in sorted(WEB_WORKSPACE.rglob("*")):
+        if not f.is_file():
+            continue
+        rel_parts = f.relative_to(WEB_WORKSPACE).parts
+        if any(p in HIDDEN_NAMES or p.startswith(".git") for p in rel_parts):
+            continue
+        result.append(f)
+    return result
 
 
 # ──────────────────────────────────────────────────────────────
@@ -300,55 +367,62 @@ st.markdown("""
     .sub-header { color: #888; font-size: 1.05rem; margin-bottom: 1.2rem; }
     div[data-testid="stSidebar"] { background: linear-gradient(180deg, #0e1117 0%, #1a1d29 100%); }
     .stButton > button { border-radius: 8px; }
-    .example-btn { margin: 0.2rem 0; }
 </style>
 """, unsafe_allow_html=True)
 
-# ── Sidebar ──────────────────────────────────────────────────
+API_KEY = get_secret("JAGX_API_KEY", "")
+BASE_URL = get_secret("JAGX_BASE_URL", DEFAULT_BASE)
+
 with st.sidebar:
     st.markdown("## ⚡ JagX Coder")
-    st.caption("Autonomous coding agent · Powered by JagX AI")
+    st.caption("Deep-reasoning agent · Full-stack · Cybersecurity")
     st.divider()
 
-    api_key = st.text_input(
-        "🔑 JagX API Key",
-        value=os.getenv("JAGX_API_KEY", ""),
-        type="password",
-        placeholder="jagx-xxxxxxxxxxxxxxxx",
-        help="Get your key from the JagX AI service",
-    )
-    base_url = st.text_input(
-        "🌐 API Base URL",
-        value=os.getenv("JAGX_BASE_URL", DEFAULT_BASE),
-    )
+    if API_KEY and API_KEY.startswith("jagx-"):
+        st.success("API key loaded from secrets ✅")
+        show_key = st.checkbox("Override API key", value=False)
+        if show_key:
+            api_key = st.text_input("JagX API Key", value=API_KEY, type="password")
+        else:
+            api_key = API_KEY
+    else:
+        st.warning("No shared key found — enter yours")
+        api_key = st.text_input(
+            "🔑 JagX API Key",
+            value="",
+            type="password",
+            placeholder="jagx-xxxxxxxxxxxxxxxx",
+        )
+
+    base_url = st.text_input("🌐 API Base URL", value=BASE_URL)
 
     st.divider()
-    st.markdown("### 📁 Workspace")
+    st.markdown("### 📁 Project files")
 
-    code_files = sorted([f for f in WEB_WORKSPACE.rglob("*") if f.is_file()])
+    code_files = list_workspace_files()
     if code_files:
-        for f in code_files[:25]:
+        for f in code_files[:40]:
             rel = str(f.relative_to(WEB_WORKSPACE))
             col1, col2 = st.columns([4, 1])
             with col1:
                 st.code(rel, language=None)
             with col2:
                 try:
-                    data = f.read_bytes()
-                    st.download_button("⬇️", data=data, file_name=f.name, key=f"dl_{rel}", help=f"Download {rel}")
+                    st.download_button("⬇️", data=f.read_bytes(), file_name=f.name,
+                                       key=f"dl_{rel}", help=f"Download {rel}")
                 except Exception:
                     pass
         zip_data = make_zip_of_workspace()
         if zip_data:
             st.download_button(
-                "📦 Download all as ZIP",
+                "📦 Download project ZIP",
                 data=zip_data,
-                file_name="jagx_workspace.zip",
+                file_name="jagx_project.zip",
                 mime="application/zip",
                 use_container_width=True,
             )
     else:
-        st.caption("No files yet — ask the agent to create some!")
+        st.caption("No project files yet — describe what you want to build.")
 
     col_a, col_b = st.columns(2)
     with col_a:
@@ -368,7 +442,7 @@ with st.sidebar:
 
     st.divider()
     st.markdown("### 🎨 Generate Image")
-    img_prompt = st.text_input("Image prompt", placeholder="A futuristic robot coding...")
+    img_prompt = st.text_input("Image prompt", placeholder="Secure server room, cyber aesthetic...")
     if st.button("Generate image", use_container_width=True) and img_prompt:
         if not api_key or not api_key.startswith("jagx-"):
             st.error("Need a valid API key")
@@ -380,50 +454,48 @@ with st.sidebar:
                     st.download_button("⬇️ Download image", data=base64.b64decode(b64),
                                        file_name="jagx_image.png", mime="image/png")
                 else:
-                    st.warning("Image generation failed or not available")
+                    st.warning("Image generation failed")
 
     st.divider()
     st.caption("JagX AI by JagX & JRILICENSE")
-    st.caption("Free · Open · Powerful")
+    st.caption("Full-stack · Secure · Reasoning-first")
 
-# ── Main ─────────────────────────────────────────────────────
 st.markdown('<p class="main-header">JagX Coder</p>', unsafe_allow_html=True)
-st.markdown('<p class="sub-header">Tell me what to build — I write, run & fix the code for you.</p>', unsafe_allow_html=True)
+st.markdown(
+    '<p class="sub-header">Deep-reasoning agent for complex apps, full-stack projects & cybersecurity work.</p>',
+    unsafe_allow_html=True,
+)
 
-# Example chips
 EXAMPLES = [
-    "Create hello.py that prints Hello from JagX Coder! and run it",
-    "Build a Python CLI todo app with add/list/done and JSON storage",
-    "Write a FastAPI app with /health and /items CRUD",
-    "Create a factorial function and test it with 5, 7, 10",
-    "Scaffold a notes API: FastAPI + SQLite + full CRUD",
+    "Build a secure full-stack notes app: FastAPI + SQLite + JWT auth + simple HTML frontend + README",
+    "Create a Python port scanner (educational) with rate limiting and clear ethical use warning",
+    "Scaffold a Flask blog with user login, password hashing, and basic XSS protection",
+    "Write a secure password generator + strength checker CLI with entropy calculation",
+    "Build a REST API with FastAPI, API-key auth, input validation, and rate limiting",
 ]
 
-st.markdown("**Quick start:**")
+st.markdown("**Try these (complex / security focused):**")
 cols = st.columns(len(EXAMPLES))
 for i, ex in enumerate(EXAMPLES):
     with cols[i]:
-        if st.button(ex[:28] + "…", key=f"ex_{i}", use_container_width=True, help=ex):
+        if st.button(ex[:32] + "…", key=f"ex_{i}", use_container_width=True, help=ex):
             st.session_state["pending_prompt"] = ex
 
-# Session state
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "history" not in st.session_state:
     st.session_state.history = []
 
-# Show history
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# Handle pending example click
 pending = st.session_state.pop("pending_prompt", None)
-prompt = st.chat_input("Describe what you want me to code...") or pending
+prompt = st.chat_input("Describe a complex app, full-stack project, or security task...") or pending
 
 if prompt:
     if not api_key or not api_key.startswith("jagx-"):
-        st.error("👉 Please enter a valid JagX API key in the sidebar (starts with `jagx-`).")
+        st.error("👉 No valid JagX API key. Add it in Streamlit Secrets or type it in the sidebar.")
         st.stop()
 
     st.session_state.messages.append({"role": "user", "content": prompt})
@@ -431,16 +503,16 @@ if prompt:
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        status = st.status("🤖 JagX Coder is working...", expanded=True)
+        status = st.status("🧠 JagX Coder is reasoning deeply...", expanded=True)
         log_area = st.empty()
         logs: List[str] = []
 
         def add_log(text: str):
             logs.append(text)
-            log_area.markdown("\n\n".join(logs[-14:]))
+            log_area.markdown("\n\n".join(logs[-16:]))
 
         try:
-            history = st.session_state.history[-10:]
+            history = st.session_state.history[-12:]
             parts = [SYSTEM_PROMPT, "\n\n=== Conversation ==="]
             for turn in history:
                 parts.append(f"{turn['role'].upper()}: {turn['content']}")
@@ -451,7 +523,7 @@ if prompt:
             final_answer = None
 
             for round_idx in range(1, MAX_TOOL_ROUNDS + 1):
-                status.update(label=f"🤖 Round {round_idx}/{MAX_TOOL_ROUNDS} — thinking...")
+                status.update(label=f"🧠 Round {round_idx}/{MAX_TOOL_ROUNDS} — deep reasoning...")
 
                 try:
                     if round_idx == 1:
@@ -459,7 +531,7 @@ if prompt:
                     else:
                         cont = (
                             SYSTEM_PROMPT + "\n\n=== Conversation ===\n"
-                            + "\n".join(f"{t['role'].upper()}: {t['content']}" for t in st.session_state.history[-12:])
+                            + "\n".join(f"{t['role'].upper()}: {t['content']}" for t in st.session_state.history[-14:])
                             + f"\nUSER: {current_input}\nASSISTANT:"
                         )
                         raw = call_jagx(api_key, base_url, cont)
@@ -471,7 +543,7 @@ if prompt:
                 thought, action, action_input, final = parse_agent_response(raw)
 
                 if thought:
-                    add_log(f"**💭 Thought:** {thought[:280]}{'…' if len(thought) > 280 else ''}")
+                    add_log(f"**💭 Thought:** {thought[:400]}{'…' if len(thought) > 400 else ''}")
 
                 if final is not None:
                     final_answer = final
@@ -486,7 +558,7 @@ if prompt:
                     break
 
                 add_log(f"**🔧 Action:** `{action}`")
-                add_log(f"**Input:** `{json.dumps(action_input, ensure_ascii=False)[:180]}`")
+                add_log(f"**Input:** `{json.dumps(action_input, ensure_ascii=False)[:200]}`")
 
                 tool_fn = TOOLS[action]["fn"]
                 try:
@@ -501,26 +573,29 @@ if prompt:
 
                 observation = result.output if result.success else f"ERROR: {result.error}\n{result.output}"
                 icon = "✅" if result.success else "❌"
-                add_log(f"{icon} **Result:** {observation[:350]}{'…' if len(observation) > 350 else ''}")
+                add_log(f"{icon} **Result:** {observation[:400]}{'…' if len(observation) > 400 else ''}")
 
                 obs_msg = (
                     f"Thought: {thought}\nAction: {action}\n"
                     f"Action Input: {json.dumps(action_input)}\nObservation: {observation}"
                 )
                 st.session_state.history.append({"role": "assistant", "content": obs_msg})
-                current_input = f"Observation from {action}:\n{observation}\n\nContinue the task."
+                current_input = (
+                    f"Observation from {action}:\n{observation}\n\n"
+                    "Continue carefully. Reason about the next best small step."
+                )
 
             if final_answer is None:
-                final_answer = "Reached maximum rounds. Try a smaller task or refine your request."
-                status.update(label="Stopped", state="error")
+                final_answer = "Reached maximum rounds. The project may be partially built — check the files in the sidebar and download the ZIP."
+                status.update(label="Stopped (max rounds)", state="error")
 
             st.markdown(final_answer)
             st.session_state.messages.append({"role": "assistant", "content": final_answer})
             st.session_state.history.append({"role": "user", "content": prompt})
             st.session_state.history.append({"role": "assistant", "content": final_answer})
 
-            if code_files or list(WEB_WORKSPACE.rglob("*")):
-                st.info("📁 New files may appear in the sidebar — you can download them.")
+            if list_workspace_files():
+                st.info("📁 Project files are in the sidebar — download them as ZIP before the app sleeps.")
 
         except Exception as e:
             st.error(f"Unexpected error: {e}")
