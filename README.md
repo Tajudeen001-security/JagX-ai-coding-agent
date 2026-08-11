@@ -1,64 +1,35 @@
-# JagX Coder — Extra-Powerful Autonomous Coding Agent
+# JagX Coder
 
-Powered by **JagX AI** (`https://jagx-ai-v2.onrender.com`)
+**Extra-Powerful Autonomous Coding Agent** powered by [JagX AI](https://jagx-ai-v2.onrender.com)
+
+[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+JagX Coder is a ReAct-style coding agent that can **read, write, run, and debug code** by itself using the JagX AI API.
+
+---
 
 ## Features
 
 - **ReAct agent loop** — Think → Act → Observe → repeat
 - **Full coding toolset**
   - `list_dir` / `read_file` / `write_file` / `append_file`
-  - `run_shell` (safe)
-  - `run_python` (execute snippets)
-  - `search_code` (grep-like)
-- Project-aware workspace isolation
-- Conversation memory
+  - `run_shell` (with safety checks)
+  - `run_python` (execute code snippets)
+  - `search_code` (grep-like search)
+- Workspace isolation (agent cannot escape the project folder)
+- Conversation memory across turns
 - Strong system prompt optimized for real coding work
-- CLI + one-shot modes
+- Interactive CLI + one-shot mode
+- Clean `.env` configuration (no secrets in code)
+
+---
 
 ## Quick Start
 
+### 1. Clone & install
+
 ```bash
-# 1. Install dependency
+git clone https://github.com/YOUR_USERNAME/jagx-coder.git
+cd jagx-coder
 pip install -r requirements.txt
-
-# 2. (Optional) set your own key / workspace
-export JAGX_API_KEY="jagx-adb6112fe4192539858e02fae18053d1"
-export JAGX_BASE_URL="https://jagx-ai-v2.onrender.com"
-export JAGX_WORKSPACE="."          # default = current directory
-
-# 3. Interactive mode
-python jagx_coder.py
-
-# 4. One-shot mode
-python jagx_coder.py "Create a FastAPI hello-world app with a /health endpoint"
-```
-
-## Example Tasks
-
-```text
-Create a clean Python CLI todo app with add/list/done commands and JSON storage
-```
-
-```text
-Refactor the file main.py — extract helpers, add type hints, and write tests
-```
-
-```text
-Build a simple Flask blog with SQLite, create/read posts, and a nice HTML template
-```
-
-```text
-Debug why this function is returning None and fix it
-```
-
-## Safety
-
-- All file operations are restricted to the `JAGX_WORKSPACE` directory
-- Extremely dangerous shell patterns are blocked
-- Agent prefers read → plan → write → test cycles
-
-## Who made this?
-
-Agent personality is **JagX AI by JagX & JRILICENSE** (as required by the API).
-
-Enjoy shipping code at high speed 🚀
